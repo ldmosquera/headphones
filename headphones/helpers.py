@@ -169,7 +169,8 @@ def replace_all(text, dic):
         text = text.replace(i, j)
     return text
     
-def cleanName(string):
+def cleanName(artist, album, title):
+    string = ' '.join((artist, album, title))
 
     pass1 = latinToAscii(string).lower()
     out_string = re.sub('[\.\-\/\!\@\#\$\%\^\&\*\(\)\+\-\"\'\,\;\:\[\]\{\}\<\>\=\_]', '', pass1).encode('utf-8')

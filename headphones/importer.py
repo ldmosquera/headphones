@@ -221,7 +221,7 @@ def addArtisttoDB(artistid, extrasonly=False):
             
             for track in release['Tracks']:
 
-                cleanname = helpers.cleanName(artist['artist_name'] + ' ' + rg['title'] + ' ' + track['title'])
+                cleanname = helpers.cleanName(artist['artist_name'], rg['title'], track['title'])
         
                 controlValueDict = {"TrackID":      track['id'],
                                     "ReleaseID":    release['ReleaseID']}
@@ -278,7 +278,7 @@ def addArtisttoDB(artistid, extrasonly=False):
         
         for track in hybridrelease['Tracks']:
 
-            cleanname = helpers.cleanName(artist['artist_name'] + ' ' + rg['title'] + ' ' + track['title'])
+            cleanname = helpers.cleanName(artist['artist_name'], rg['title'], track['title'])
     
             controlValueDict = {"TrackID":      track['id'],
                                 "ReleaseID":    rg['id']}
@@ -523,7 +523,7 @@ def addReleaseById(rid):
         
         for track in release_dict['tracks']:
         
-            cleanname = helpers.cleanName(release_dict['artist_name'] + ' ' + release_dict['rg_title'] + ' ' + track['title'])
+            cleanname = helpers.cleanName(release_dict['artist_name'], release_dict['rg_title'], track['title'])
             
             controlValueDict = {"TrackID":  track['id'],
                                 "AlbumID":  rgid}
