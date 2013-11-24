@@ -145,7 +145,7 @@ def libraryScan(dir=None, append=False, ArtistID=None, ArtistName=None, cron=Fal
         logger.info('Updating current artist track counts')
     
         for artist in current_artists:
-            havetracks = count_have_tracks(myDB, artist['ArtistID'], artist['ArtistName'])
+            havetracks = importer.countHaveTracks(artist['ArtistID'], artist['ArtistName'])
             myDB.action('UPDATE artists SET HaveTracks=? WHERE ArtistID=?', [havetracks, artist['ArtistID']])
             
         logger.info('Found %i new artists' % len(artist_list))
@@ -167,12 +167,18 @@ def libraryScan(dir=None, append=False, ArtistID=None, ArtistName=None, cron=Fal
         # If we're appending a new album to the database, update the artists total track counts
         logger.info('Updating artist track counts')
         
-        havetracks = count_have_tracks(myDB, ArtistID, ArtistName)
+        havetracks = importer.countHaveTracks(ArtistID, ArtistName)
         myDB.action('UPDATE artists SET HaveTracks=? WHERE ArtistID=?', [havetracks, ArtistID])
 
 
 
 
+
+def count_have_tracks(myDB, artistId, artistName):
+    # Have tracks are selected from tracks table and not from alltracks because of duplicates
+    # We update the track count upon an album switch to compliment this
+    return myDB.select('SELECT count(1) from tracks WHERE ArtistID=? AND Location IS NOT NULL', [artistID]).fetchone()[0] + \
+           myDB.select('SELECT count(1) from have WHERE ArtistName like ?', [artistName]).fetchone()[0]
 
 #idiomatization for a bunch of queries that happened a lot of times
 def select_from_tracks_or_all_tracks(myDB, select, where, args):

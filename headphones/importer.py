@@ -27,28 +27,12 @@ blacklisted_special_artists = ['f731ccc4-e22a-43af-a747-64213329e088','33cf029c-
                                 '9be7f096-97ec-4615-8957-8d40b5dcbc41','125ec42a-7229-4250-afc5-e057484327fe',\
                                 '89ad4ac3-39f7-470e-963a-56509c546377']
 
-        
-def is_exists(artistid):
-
-    myDB = db.DBConnection()
-    
-    # See if the artist is already in the database
-    artistlist = myDB.select('SELECT ArtistID, ArtistName from artists WHERE ArtistID=?', [artistid])
-
-    if any(artistid in x for x in artistlist):
-        logger.info(artistlist[0][1] + u" is already in the database. Updating 'have tracks', but not artist information")
-        return True
-    else:
-        return False
-
-
 def artistlist_to_mbids(artistlist, forced=False):
 
     for artist in artistlist:
         
-        if not artist and not (artist == ' '):
+        if not artist or artist == ' ':
             continue
-            
 
         # If adding artists through Manage New Artists, they're coming through as non-unicode (utf-8?)
         # and screwing everything up
@@ -56,7 +40,7 @@ def artistlist_to_mbids(artistlist, forced=False):
             try:
                 artist = artist.decode('utf-8', 'replace')
             except:
-                logger.warn("Unable to convert artist to unicode so cannot do a database lookup")
+                logger.warn("Unable to convert artist %s to unicode so cannot do a database lookup; skipping" % artist)
                 continue
             
         results = mb.findArtist(artist, limit=1)
@@ -82,13 +66,17 @@ def artistlist_to_mbids(artistlist, forced=False):
                 logger.info("Artist ID for '%s' is either blacklisted or Various Artists. To add artist, you must do it manually (Artist ID: %s)" % (artist, artistid))
                 continue
         
+        exists = myDB.action('SELECT count(1) as count from artists WHERE ArtistID=?', [artistid]).fetchone()['count'] > 0
+
         # Add to database if it doesn't exist
-        if not is_exists(artistid):
+        if not exists:
             addArtisttoDB(artistid)
         
         # Just update the tracks if it does
         else:
-            havetracks = len(myDB.select('SELECT TrackTitle from tracks WHERE ArtistID=?', [artistid])) + len(myDB.select('SELECT TrackTitle from have WHERE ArtistName like ?', [artist]))
+            logger.info("%s is already in the database. Updating 'have tracks', but not artist information" % artist)
+
+            havetracks = countHaveTracks(artistid, artist)
             myDB.action('UPDATE artists SET HaveTracks=? WHERE ArtistID=?', [havetracks, artistid])
             
         # Delete it from the New Artists if the request came from there
@@ -100,7 +88,7 @@ def artistlist_to_mbids(artistlist, forced=False):
     try:
         lastfm.getSimilar()
     except Exception, e:
-        logger.warn('Failed to update arist information from Last.fm: %s' % e)
+        logger.warn('Failed to update artist information from Last.fm: %s' % e)
         
 def addArtistIDListToDB(artistidlist):
     # Used to add a list of artist IDs to the database in a single thread
@@ -435,7 +423,7 @@ def addArtisttoDB(artistid, extrasonly=False):
 
     latestalbum = myDB.action('SELECT AlbumTitle, ReleaseDate, AlbumID from albums WHERE ArtistID=? order by ReleaseDate DESC', [artistid]).fetchone()
     totaltracks = len(myDB.select('SELECT TrackTitle from tracks WHERE ArtistID=?', [artistid]))
-    havetracks = len(myDB.select('SELECT TrackTitle from tracks WHERE ArtistID=? AND Location IS NOT NULL', [artistid])) + len(myDB.select('SELECT TrackTitle from have WHERE ArtistName like ?', [artist['artist_name']]))
+    havetracks = countHaveTracks(artistid, artist['artist_name'])
 
     controlValueDict = {"ArtistID":     artistid}
     
@@ -685,3 +673,9 @@ def getHybridRelease(fullreleaselist):
                     }
                 
     return release_dict
+
+def countHaveTracks(artistID, artistName):
+    myDB = db.DBConnection()
+    return myDB.action('SELECT count(1) as count from tracks WHERE ArtistID=? AND Location IS NOT NULL', [artistID]).fetchone()['count'] + \
+           myDB.action('SELECT count(1) as count from have WHERE ArtistName like ?', [artistID]).fetchone()['count']
+
