@@ -71,52 +71,62 @@ def startmb():
     
     return True
 
-def findArtist(name, limit=1):
-
-    with mb_lock:       
-        artistlist = []
-        artistResults = None
-        
-        chars = set('!?*')
-        if any((c in chars) for c in name):
-            name = '"'+name+'"'
-            
+def findArtist(name):
+    with mb_lock:
         try:
-            artistResults = musicbrainzngs.search_artists(query='artist:'+name,limit=limit)['artist-list']
+            query = 'artist:"%s"' % name
+            #limit to 2 results; only enough to see if it's unique or if we need to disambiguate by album names
+            artistResults = musicbrainzngs.search_artists(query=query, limit=2)['artist-list']
         except WebServiceError, e:
             logger.warn('Attempt to query MusicBrainz for %s failed (%s)' % (name, str(e)))
             time.sleep(5)
-        
+
+        if not artistResults or len(artistResults) == 0:
+            return False
+
+        if len(artistResults) == 1:
+            return artistResults[0]['id']
+        else:
+            logger.info('Found multiple artists named "%s" - doing an album based search' % name)
+
+            artist_id = findArtistbyAlbum(name)
+            if artist_id:
+                logger.info('Successful match by album!')
+                return artist_id
+            else:
+                logger.info('Cannot determine the best match from an artist/album search. Using top match instead')
+                return artistResults[0]['id']
+
+def searchArtists(name):
+    with mb_lock:
+        artistlist = []
+        artistResults = None
+
+        name = '"'+name+'"'
+
+        try:
+            artistResults = musicbrainzngs.search_artists(query='artist:'+name,limit=100)['artist-list']
+        except WebServiceError, e:
+            logger.warn('Attempt to query MusicBrainz for %s failed (%s)' % (name, str(e)))
+            time.sleep(5)
+
         if not artistResults:
-            return False        
+            return False
+
         for result in artistResults:
             if 'disambiguation' in result:
-                uniquename = unicode(result['sort-name'] + " (" + result['disambiguation'] + ")")
+                uniquename = unicode("%s (%s)" % (result['sort-name'], result['disambiguation']))
             else:
                 uniquename = unicode(result['sort-name'])
-            if result['name'] != uniquename and limit == 1:
-                logger.info('Found an artist with a disambiguation: %s - doing an album based search' % name)
-                artistdict = findArtistbyAlbum(name)                
-                if not artistdict:
-                    logger.info('Cannot determine the best match from an artist/album search. Using top match instead')
-                    artistlist.append({
-                    # Just need the artist id if the limit is 1
-                    #    'name':             unicode(result['sort-name']),
-                    #    'uniquename':        uniquename,
-                        'id':                unicode(result['id']),
-                    #    'url':                 unicode("http://musicbrainz.org/artist/" + result['id']),#probably needs to be changed
-                    #    'score':            int(result['ext:score'])
-                        })                    
-                else:
-                    artistlist.append(artistdict)
-            else:                
-                artistlist.append({
-                        'name':             unicode(result['sort-name']),
-                        'uniquename':       uniquename,
-                        'id':               unicode(result['id']),
-                        'url':              unicode("http://musicbrainz.org/artist/" + result['id']),#probably needs to be changed
-                        'score':            int(result['ext:score'])
-                        })
+
+            artistlist.append({
+                'name':       unicode(result['sort-name']),
+                'uniquename': uniquename,
+                'id':         unicode(result['id']),
+                'url':        unicode("http://musicbrainz.org/artist/" + result['id']),#probably needs to be changed
+                'score':      int(result['ext:score'])
+            })
+
         return artistlist
         
 def findRelease(name, limit=1):
@@ -173,11 +183,6 @@ def getArtist(artistid, extrasonly=False):
         if not artist:
             return False
         
-        #if 'disambiguation' in artist:
-        #    uniquename = unicode(artist['sort-name'] + " (" + artist['disambiguation'] + ")")
-        #else:
-        #    uniquename = unicode(artist['sort-name'])
-        
         artist_dict['artist_name'] = unicode(artist['name'])
         
         # Not using the following values anywhere yet so we don't need to grab them.
@@ -194,7 +199,6 @@ def getArtist(artistid, extrasonly=False):
         #        artist_dict['artist_begindate'] = unicode(artist['life-span']['begin'])
         #    if 'end' in artist['life-span']:
         #        artist_dict['artist_enddate'] = unicode(artist['life-span']['end'])      
-
 
         releasegroups = []
         
@@ -407,52 +411,33 @@ def getTracksFromRelease(release):
             totalTracks += 1      
     return tracks
 
-# Used when there is a disambiguation
+# Used to disambiguate
 def findArtistbyAlbum(name):
 
     myDB = db.DBConnection()
-    
-    artist = myDB.action('SELECT AlbumTitle from have WHERE ArtistName=? AND AlbumTitle IS NOT NULL ORDER BY RANDOM()', [name]).fetchone()
-    
-    if not artist:
-        return False
-        
-    # Probably not neccessary but just want to double check
-    if not artist['AlbumTitle']:
-        return False
+    #query all albums that we know of
+    albumRows = myDB.select('SELECT distinct(AlbumTitle) as album from have WHERE ArtistName=? AND AlbumTitle IS NOT NULL', [name])
 
-    term = '"'+artist['AlbumTitle']+'" AND artist:"'+name+'"'
+    #search for an album belonging to the artist we look for, and return its ID
+    for albumRow in albumRows:
+        query = '"%s" AND artist:"%s"' % (albumRow['album'], name)
 
-    results = None
-    
-    try:
-        results = musicbrainzngs.search_release_groups(term).get('release-group-list')
-    except WebServiceError, e:
-        logger.warn('Attempt to query MusicBrainz for %s failed (%s)' % (name, str(e)))
-        time.sleep(5)    
-    
-    
-    if not results:
-        return False
+        try:
+            results = musicbrainzngs.search_release_groups(query)['release-group-list']
+        except WebServiceError, e:
+            logger.warn('Attempt to query MusicBrainz for %s failed (%s)' % (name, str(e)))
+            time.sleep(5)
 
-    artist_dict = {}
-    for releaseGroup in results:
-        newArtist = releaseGroup['artist-credit'][0]['artist']         
-        # Only need the artist ID if we're doing an artist+album lookup
-        #if 'disambiguation' in newArtist:
-        #    uniquename = unicode(newArtist['sort-name'] + " (" + newArtist['disambiguation'] + ")")
-        #else:
-        #    uniquename = unicode(newArtist['sort-name'])
-        #artist_dict['name'] = unicode(newArtist['sort-name'])
-        #artist_dict['uniquename'] = uniquename
-        artist_dict['id'] = unicode(newArtist['id'])
-        #artist_dict['url'] = u'http://musicbrainz.org/artist/' + newArtist['id']
-        #artist_dict['score'] = int(releaseGroup['ext:score'])
+        if not results or len(results) == 0:
+            continue
+        else:
+            for rg in results:
+                for a in rg['artist-credit']:
+                    if a['artist']['name'] == name:
+                        return unicode(a['artist']['id'])
 
-    
-    
-    return artist_dict
-    
+    return False
+
 def findAlbumID(artist=None, album=None):
 
     results = None

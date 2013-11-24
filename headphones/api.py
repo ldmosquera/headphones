@@ -22,7 +22,7 @@ from xml.dom.minidom import Document
 import copy
 
 cmd_list = [ 'getIndex', 'getArtist', 'getAlbum', 'getUpcoming', 'getWanted', 'getSimilar', 'getHistory', 'getLogs', 
-            'findArtist', 'findAlbum', 'addArtist', 'delArtist', 'pauseArtist', 'resumeArtist', 'refreshArtist',
+            'findArtist', 'searchArtists', 'findAlbum', 'addArtist', 'delArtist', 'pauseArtist', 'resumeArtist', 'refreshArtist',
             'addAlbum', 'queueAlbum', 'unqueueAlbum', 'forceSearch', 'forceProcess', 'getVersion', 'checkGithub', 
             'shutdown', 'restart', 'update', 'getArtistArt', 'getAlbumArt', 'getArtistInfo', 'getAlbumInfo', 'getArtistThumb', 'getAlbumThumb']
 
@@ -171,6 +171,13 @@ class Api(object):
             limit=50
         
         self.data = mb.findArtist(kwargs['name'], limit)
+
+    def _searchArtists(self, **kwargs):
+        if 'name' not in kwargs:
+            self.data = 'Missing parameter: name'
+            return
+
+        self.data = mb.searchArtists(kwargs['name'])
 
     def _findAlbum(self, **kwargs):
         if 'name' not in kwargs:

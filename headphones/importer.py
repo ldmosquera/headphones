@@ -43,19 +43,12 @@ def artistlist_to_mbids(artistlist, forced=False):
                 logger.warn("Unable to convert artist %s to unicode so cannot do a database lookup; skipping" % artist)
                 continue
             
-        results = mb.findArtist(artist, limit=1)
-        
-        if not results:
-            logger.info('No results found for: %s' % artist)
-            continue
-        
-        try:    
-            artistid = results[0]['id']
-        
-        except IndexError:
+        artistid = mb.findArtist(artist)
+
+        if not artistid:
             logger.info('MusicBrainz query turned up no matches for: %s' % artist)
             continue
-            
+
         # Check if it's blacklisted/various artists (only check if it's not forced, e.g. through library scan auto-add.)
         # Forced example = Adding an artist from Manage New Artists
         myDB = db.DBConnection()
@@ -89,6 +82,8 @@ def artistlist_to_mbids(artistlist, forced=False):
         lastfm.getSimilar()
     except Exception, e:
         logger.warn('Failed to update artist information from Last.fm: %s' % e)
+
+    logger.info('Done adding new artists')
         
 def addArtistIDListToDB(artistidlist):
     # Used to add a list of artist IDs to the database in a single thread
@@ -158,9 +153,9 @@ def addArtisttoDB(artistid, extrasonly=False):
         sortname = artist['artist_name'][4:]
     else:
         sortname = artist['artist_name']
-        
 
-    logger.info(u"Now adding/updating: " + artist['artist_name'])
+    logger.info(u"Now adding/updating artist: " + artist['artist_name'])
+
     controlValueDict = {"ArtistID":     artistid}
     newValueDict = {"ArtistName":       artist['artist_name'],
                     "ArtistSortName":   sortname,
@@ -181,14 +176,14 @@ def addArtisttoDB(artistid, extrasonly=False):
 
     for rg in artist['releasegroups']:
         
-        logger.info("Now adding/updating: " + rg['title'])
-        
+        logger.info(u"Now adding/updating release group: " + artist['artist_name'] + " - " + rg['title'])
+
         rgid = rg['id']
         
         # check if the album already exists
-        rg_exists = myDB.action("SELECT * from albums WHERE AlbumID=?", [rg['id']]).fetchone()
+        rg_exists = myDB.action("SELECT * from albums WHERE AlbumID=?", [rgid]).fetchone()
                     
-        releases = mb.get_all_releases(rgid,includeExtras)
+        releases = mb.get_all_releases(rgid, includeExtras)
         if releases == []:
             logger.info('No official releases in release group %s' % rg['title'])
             continue
@@ -201,9 +196,9 @@ def addArtisttoDB(artistid, extrasonly=False):
         fullreleaselist = []
 
         for release in releases:
-        # What we're doing here now is first updating the allalbums & alltracks table to the most
-        # current info, then moving the appropriate release into the album table and its associated
-        # tracks into the tracks table
+            # What we're doing here now is first updating the allalbums & alltracks table to the most
+            # current info, then moving the appropriate release into the album table and its associated
+            # tracks into the tracks table
             controlValueDict = {"ReleaseID" : release['ReleaseID']}
 
             newValueDict = {"ArtistID":         release['ArtistID'],
@@ -421,28 +416,25 @@ def addArtisttoDB(artistid, extrasonly=False):
             from headphones import searcher
             searcher.searchforalbum(albumid=rg['id'])
 
-    latestalbum = myDB.action('SELECT AlbumTitle, ReleaseDate, AlbumID from albums WHERE ArtistID=? order by ReleaseDate DESC', [artistid]).fetchone()
-    totaltracks = len(myDB.select('SELECT TrackTitle from tracks WHERE ArtistID=?', [artistid]))
+    latestalbum = myDB.action('SELECT AlbumTitle, ReleaseDate, AlbumID from albums WHERE ArtistID=? order by ReleaseDate DESC limit 1', [artistid]).fetchone()
+    totaltracks = myDB.action('SELECT count(1) as count from tracks WHERE ArtistID=?', [artistid]).fetchone()['count']
     havetracks = countHaveTracks(artistid, artist['artist_name'])
 
     controlValueDict = {"ArtistID":     artistid}
     
+    artistUpdateDict = { "Status":      "Active",
+                         "TotalTracks": totaltracks,
+                         "HaveTracks":  havetracks}
+
     if latestalbum:
-        newValueDict = {"Status":           "Active",
-                        "LatestAlbum":      latestalbum['AlbumTitle'],
-                        "ReleaseDate":      latestalbum['ReleaseDate'],
-                        "AlbumID":          latestalbum['AlbumID'],
-                        "TotalTracks":      totaltracks,
-                        "HaveTracks":       havetracks}
-    else:
-        newValueDict = {"Status":           "Active",
-                        "TotalTracks":      totaltracks,
-                        "HaveTracks":       havetracks}
-                        
+        artistUpdateDict["LatestAlbum"] = latestalbum['AlbumTitle']
+        artistUpdateDict["ReleaseDate"] = latestalbum['ReleaseDate']
+        artistUpdateDict["AlbumID"] =     latestalbum['AlbumID']
+
     if not errors:
-        newValueDict['LastUpdated'] = helpers.now()
+        artistUpdateDict['LastUpdated'] = helpers.now()
     
-    myDB.upsert("artists", newValueDict, controlValueDict)
+    myDB.upsert("artists", artistUpdateDict, controlValueDict)
     
     logger.info(u"Seeing if we need album art for: " + artist['artist_name'])
     cache.getThumb(ArtistID=artistid)
@@ -451,7 +443,7 @@ def addArtisttoDB(artistid, extrasonly=False):
         logger.info("Finished updating artist: " + artist['artist_name'] + " but with errors, so not marking it as updated in the database")
     else:
         logger.info(u"Updating complete for: " + artist['artist_name'])
-    
+
 def addReleaseById(rid):
     
     myDB = db.DBConnection()
