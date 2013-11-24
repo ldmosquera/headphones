@@ -240,6 +240,9 @@ CUSTOMSLEEP = None
 HPUSER = None
 HPPASS = None
 
+USE_BEETS_DB = False
+BEETS_DB_PATH = None
+
 CACHE_SIZEMB = 32
 JOURNAL_MODE = None
 
@@ -311,7 +314,8 @@ def initialize():
                 PROWL_ENABLED, PROWL_PRIORITY, PROWL_KEYS, PROWL_ONSNATCH, PUSHOVER_ENABLED, PUSHOVER_PRIORITY, PUSHOVER_KEYS, PUSHOVER_ONSNATCH, MIRRORLIST, \
                 MIRROR, CUSTOMHOST, CUSTOMPORT, CUSTOMSLEEP, HPUSER, HPPASS, XBMC_ENABLED, XBMC_HOST, XBMC_USERNAME, XBMC_PASSWORD, XBMC_UPDATE, \
                 XBMC_NOTIFY, NMA_ENABLED, NMA_APIKEY, NMA_PRIORITY, NMA_ONSNATCH, SYNOINDEX_ENABLED, ALBUM_COMPLETION_PCT, PREFERRED_BITRATE_HIGH_BUFFER, \
-                PREFERRED_BITRATE_LOW_BUFFER, PREFERRED_BITRATE_ALLOW_LOSSLESS, CACHE_SIZEMB, JOURNAL_MODE, UMASK, ENABLE_HTTPS, HTTPS_CERT, HTTPS_KEY
+                PREFERRED_BITRATE_LOW_BUFFER, PREFERRED_BITRATE_ALLOW_LOSSLESS, CACHE_SIZEMB, JOURNAL_MODE, UMASK, ENABLE_HTTPS, HTTPS_CERT, HTTPS_KEY, \
+                USE_BEETS_DB, BEETS_DB_PATH
 
         if __INITIALIZED__:
             return False
@@ -414,6 +418,14 @@ def initialize():
         PIRATEBAY_PROXY_URL = check_setting_str(CFG, 'General', 'piratebay_proxy_url', '')
         MININOVA = bool(check_setting_int(CFG, 'General', 'mininova', 0))
         DOWNLOAD_TORRENT_DIR = check_setting_str(CFG, 'General', 'download_torrent_dir', '')
+
+        USE_BEETS_DB = check_setting_int(CFG, 'General', 'use_beets_db', 0)
+
+        #FIXME: we should probably:
+        #   1. update beets to the latest version
+        #   2. assume that beets config is in ~/.config/beets/config.yaml
+        #   3. autodetect this config option from that file (but allow the user to override it)
+        BEETS_DB_PATH = check_setting_str(CFG, 'General', 'beets_db_path', '')
 
         WAFFLES = bool(check_setting_int(CFG, 'Waffles', 'waffles', 0))
         WAFFLES_UID = check_setting_str(CFG, 'Waffles', 'waffles_uid', '')
@@ -773,6 +785,9 @@ def config_write():
     new_config['General']['piratebay_proxy_url'] = PIRATEBAY_PROXY_URL
     new_config['General']['download_torrent_dir'] = DOWNLOAD_TORRENT_DIR
 
+    new_config['General']['use_beets_db'] = USE_BEETS_DB
+    new_config['General']['beets_db_path'] = BEETS_DB_PATH
+
     new_config['Waffles'] = {}
     new_config['Waffles']['waffles'] = int(WAFFLES)
     new_config['Waffles']['waffles_uid'] = WAFFLES_UID
@@ -951,6 +966,7 @@ def dbcheck():
     c.execute('CREATE TABLE IF NOT EXISTS blacklist (ArtistID TEXT UNIQUE)')
     c.execute('CREATE TABLE IF NOT EXISTS newartists (ArtistName TEXT UNIQUE)')
     c.execute('CREATE TABLE IF NOT EXISTS releases (ReleaseID TEXT, ReleaseGroupID TEXT, UNIQUE(ReleaseID, ReleaseGroupID))')
+
     c.execute('CREATE INDEX IF NOT EXISTS tracks_albumid ON tracks(AlbumID ASC)')
     c.execute('CREATE INDEX IF NOT EXISTS album_artistid_reldate ON albums(ArtistID ASC, ReleaseDate DESC)')
 

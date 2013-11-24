@@ -15,8 +15,11 @@
 
 import os
 import glob
+import datetime
+import time
 
 from lib.beets.mediafile import MediaFile
+import lib.beets.library as beets
 
 import headphones
 from headphones import db, logger, helpers, importer
@@ -37,14 +40,18 @@ def libraryScan(dir=None, append=False, ArtistID=None, ArtistName=None, cron=Fal
     # already bytestring
     if not append:
         dir = dir.encode(headphones.SYS_ENCODING)
-        
+
+    unicode_dir = dir.decode(headphones.SYS_ENCODING, 'replace')
+
     if not os.path.isdir(dir):
-        logger.warn('Cannot find directory: %s. Not scanning' % dir.decode(headphones.SYS_ENCODING, 'replace'))
+        logger.warn('Cannot find directory: %s. Not scanning' % unicode_dir)
         return
 
     myDB = db.DBConnection()
     
     if not append:
+        logger.info("checking existing tracks")
+
         # Clean up bad filepaths
         tracks = myDB.select('SELECT Location, TrackID from tracks WHERE Location IS NOT NULL')
     
@@ -54,69 +61,17 @@ def libraryScan(dir=None, append=False, ArtistID=None, ArtistName=None, cron=Fal
 
         myDB.action('DELETE from have')
 
-    logger.info('Scanning music directory: %s' % dir.decode(headphones.SYS_ENCODING, 'replace'))
+    using_beets_db = headphones.USE_BEETS_DB and not append
 
     new_artists = []
-    bitrates = []
-    
-    song_list = []
-    
-    for r,d,f in os.walk(dir):
-        #need to abuse slicing to get a copy of the list, doing it directly will skip the element after a deleted one
-        #using a list comprehension will not work correctly for nested subdirectories (os.walk keeps its original list)
-        for directory in d[:]:
-            if directory.startswith("."):
-                d.remove(directory)
-        for files in f:
-            # MEDIA_FORMATS = music file extensions, e.g. mp3, flac, etc
-            if any(files.lower().endswith('.' + x.lower()) for x in headphones.MEDIA_FORMATS):
-
-                song = os.path.join(r, files)
-
-                # We need the unicode path to use for logging, inserting into database
-                unicode_song_path = song.decode(headphones.SYS_ENCODING, 'replace')
-
-                # Try to read the metadata
-                try:
-                    f = MediaFile(song)
-
-                except:
-                    logger.error('Cannot read file: ' + unicode_song_path)
-                    continue
-                    
-                # Grab the bitrates for the auto detect bit rate option
-                if f.bitrate:
-                    bitrates.append(f.bitrate)
-                    
-                # Use the album artist over the artist if available
-                if f.albumartist:
-                    f_artist = f.albumartist
-                elif f.artist:
-                    f_artist = f.artist
-                else:
-                    f_artist = None
-                    
-                # Add the song to our song list - 
-                # TODO: skip adding songs without the minimum requisite information (just a matter of putting together the right if statements)
-
-                song_dict = { 'TrackID' : f.mb_trackid,
-                              'ReleaseID' : f.mb_albumid,
-                              'ArtistName' : f_artist,
-                              'AlbumTitle' : f.album,
-                              'TrackNumber': f.track,
-                              'TrackLength': f.length,
-                              'Genre'      : f.genre,
-                              'Date'       : f.date,
-                              'TrackTitle' : f.title,
-                              'BitRate'    : f.bitrate,
-                              'Format'     : f.format,
-                              'Location'   : unicode_song_path }
-                              
-                song_list.append(song_dict)
+    if using_beets_db:
+        song_list, bitrates = scanBeetsDB(dir)
+    else:
+        song_list, bitrates = scanDirectory(dir)
 
     # Now we start track matching
     total_number_of_songs = len(song_list)
-    logger.info("Found " + str(total_number_of_songs) + " tracks in: '" + dir.decode(headphones.SYS_ENCODING, 'replace') + "'. Matching tracks to the appropriate releases....")
+    logger.info("Found %d tracks; matching tracks to the appropriate releases..." % total_number_of_songs)
     
     # Sort the song_list by most vague (e.g. no trackid or releaseid) to most specific (both trackid & releaseid)
     # When we insert into the database, the tracks with the most specific information will overwrite the more general matches
@@ -125,25 +80,44 @@ def libraryScan(dir=None, append=False, ArtistID=None, ArtistName=None, cron=Fal
     
     # We'll use this to give a % completion, just because the track matching might take a while
     song_count = 0
-    
+    time_last = time.time()
+    start_time = time_last
+
     for song in song_list:
-        
+        if song_count > 0:
+            now = time.time()
+            last = (now - time_last) * 1000
+            avg = ((now - start_time) * 1000) / song_count
+            remaining = (total_number_of_songs - song_count) * ((now - start_time) / song_count) / 3600.0
+            #logger.debug("last track: %dms - avg: %dms - remaining: %0.2fhs" % (last, avg, remaining))
+            time_last = now
+
         song_count += 1
-        completion_percentage = float(song_count)/total_number_of_songs * 100
-        
-        if completion_percentage%10 == 0:
-            logger.info("Track matching is " + str(completion_percentage) + "% complete")
-        
-        # If the track has a trackid & releaseid (beets: albumid) that the most surefire way
+        if song_count % 100 == 0:
+            completion_percentage = float(song_count)/total_number_of_songs * 100
+            logger.info("Track matching: %d of %d - %.2f%% - average per track: %dms - remaining: %0.2fhs" % \
+                (song_count, total_number_of_songs, completion_percentage, avg, remaining))
+
+        newSongDict = {  'Location' : song['Location'],
+                         'BitRate'  : song['BitRate'],
+                         'Format'   : song['Format'] }
+
+        cleanName = helpers.cleanName(song['ArtistName'], song['AlbumTitle'], song['TrackTitle'])
+
+        all_mb_info_present = False
+
+        # If the track has a trackid & releaseid (beets: albumid), that's the most surefire way
         # of identifying a track to a specific release so we'll use that first
         if song['TrackID'] and song['ReleaseID']:
 
+            all_mb_info_present = True
+
             # Check both the tracks table & alltracks table in case they haven't populated the alltracks table yet
-            track = myDB.action('SELECT TrackID, ReleaseID, AlbumID from alltracks WHERE TrackID=? AND ReleaseID=?', [song['TrackID'], song['ReleaseID']]).fetchone()
-            
             # It might be the case that the alltracks table isn't populated yet, so maybe we can only find a match in the tracks table
-            if not track:
-                track = myDB.action('SELECT TrackID, ReleaseID, AlbumID from tracks WHERE TrackID=? AND ReleaseID=?', [song['TrackID'], song['ReleaseID']]).fetchone()
+            track = select_from_tracks_or_all_tracks(myDB,
+                'SELECT TrackID, ReleaseID, AlbumID',
+                'WHERE TrackID=? AND ReleaseID=?',
+                [song['TrackID'], song['ReleaseID']])
     
             if track:
                 # Use TrackID & ReleaseID here since there can only be one possible match with a TrackID & ReleaseID query combo
@@ -153,164 +127,157 @@ def libraryScan(dir=None, append=False, ArtistID=None, ArtistName=None, cron=Fal
                 # Insert it into the Headphones hybrid release (ReleaseID == AlbumID)                   
                 hybridControlValueDict = { 'TrackID'   : track['TrackID'],
                                            'ReleaseID' : track['AlbumID'] }
-                                     
-                newValueDict = { 'Location' : song['Location'],
-                                 'BitRate'  : song['BitRate'],
-                                 'Format'   : song['Format'] }
                                  
                 # Update both the tracks table and the alltracks table using the controlValueDict and hybridControlValueDict
-                myDB.upsert("alltracks", newValueDict, controlValueDict)
-                myDB.upsert("tracks", newValueDict, controlValueDict)
-                
-                myDB.upsert("alltracks", newValueDict, hybridControlValueDict)
-                myDB.upsert("tracks", newValueDict, hybridControlValueDict)
+                myDB.upsert("alltracks", newSongDict, controlValueDict)
+                myDB.upsert("tracks", newSongDict, controlValueDict)
+
+                myDB.upsert("alltracks", newSongDict, hybridControlValueDict)
+                myDB.upsert("tracks", newSongDict, hybridControlValueDict)
                 
                 # Matched. Move on to the next one:
                 continue
     
-        # If we can't find it with TrackID & ReleaseID, next most specific will be 
-        # releaseid + tracktitle, although perhaps less reliable due to a higher 
-        # likelihood of variations in the song title (e.g. feat. artists)
-        if song['ReleaseID'] and song['TrackTitle']:
-    
-            track = myDB.action('SELECT TrackID, ReleaseID, AlbumID from alltracks WHERE ReleaseID=? AND TrackTitle=?', [song['ReleaseID'], song['TrackTitle']]).fetchone()
-    
-            if not track:
-                track = myDB.action('SELECT TrackID, ReleaseID, AlbumID from tracks WHERE ReleaseID=? AND TrackTitle=?', [song['ReleaseID'], song['TrackTitle']]).fetchone()
-                
-            if track:
-                # There can also only be one match for this query as well (although it might be on both the tracks and alltracks table)
-                # So use both TrackID & ReleaseID as the control values
-                controlValueDict = { 'TrackID'   : track['TrackID'],
-                                     'ReleaseID' : track['ReleaseID'] }
-                                     
-                hybridControlValueDict = { 'TrackID'   : track['TrackID'],
-                                           'ReleaseID' : track['AlbumID'] }
-                                     
-                newValueDict = { 'Location' : song['Location'],
-                                 'BitRate'  : song['BitRate'],
-                                 'Format'   : song['Format'] }
-                                 
-                # Update both tables here as well
-                myDB.upsert("alltracks", newValueDict, controlValueDict)
-                myDB.upsert("tracks", newValueDict, controlValueDict)
-                
-                myDB.upsert("alltracks", newValueDict, hybridControlValueDict)
-                myDB.upsert("tracks", newValueDict, hybridControlValueDict)
-                
-                # Done
-                continue
-                
-        # Next most specific will be the opposite: a TrackID and an AlbumTitle
-        # TrackIDs span multiple releases so if something is on an official album
-        # and a compilation, for example, this will match it to the right one
-        # However - there may be multiple matches here
-        if song['TrackID'] and song['AlbumTitle']:
-    
-            # Even though there might be multiple matches, we just need to grab one to confirm a match
-            track = myDB.action('SELECT TrackID, AlbumTitle from alltracks WHERE TrackID=? AND AlbumTitle LIKE ?', [song['TrackID'], song['AlbumTitle']]).fetchone()
-    
-            if not track:
-                track = myDB.action('SELECT TrackID, AlbumTitle from tracks WHERE TrackID=? AND AlbumTitle LIKE ?', [song['TrackID'], song['AlbumTitle']]).fetchone()
-                
-            if track:
-                # Don't need the hybridControlValueDict here since ReleaseID is not unique
-                controlValueDict = { 'TrackID'   : track['TrackID'],
-                                     'AlbumTitle' : track['AlbumTitle'] }
-                                     
-                newValueDict = { 'Location' : song['Location'],
-                                 'BitRate'  : song['BitRate'],
-                                 'Format'   : song['Format'] }
+        #The rest of the matching checks can be avoided if we're using the beets DB and all info is present;
+        #it's almost certain that this is a new artist and the rest of the checks won't find anything.
+        #In other words, when using Beets, trust the tags more.
+        can_skip_extra_checks = using_beets_db and all_mb_info_present
 
-                myDB.upsert("alltracks", newValueDict, controlValueDict)
-                myDB.upsert("tracks", newValueDict, controlValueDict)
+        if not can_skip_extra_checks:
+            # If we can't find it with TrackID & ReleaseID, next most specific will be
+            # releaseid + tracktitle, although perhaps less reliable due to a higher
+            # likelihood of variations in the song title (e.g. feat. artists)
+            if song['ReleaseID'] and song['TrackTitle']:
 
-                continue   
-        
-        # Next most specific is the ArtistName + AlbumTitle + TrackTitle combo (but probably 
-        # even more unreliable than the previous queries, and might span multiple releases)
-        if song['ArtistName'] and song['AlbumTitle'] and song['TrackTitle']:
-            
-            track = myDB.action('SELECT ArtistName, AlbumTitle, TrackTitle from alltracks WHERE ArtistName LIKE ? AND AlbumTitle LIKE ? AND TrackTitle LIKE ?', [song['ArtistName'], song['AlbumTitle'], song['TrackTitle']]).fetchone()
-    
-            if not track:
-                track = myDB.action('SELECT ArtistName, AlbumTitle, TrackTitle from tracks WHERE ArtistName LIKE ? AND AlbumTitle LIKE ? AND TrackTitle LIKE ?', [song['ArtistName'], song['AlbumTitle'], song['TrackTitle']]).fetchone()
-                
-            if track:
-                controlValueDict = { 'ArtistName' : track['ArtistName'],
-                                     'AlbumTitle' : track['AlbumTitle'],
-                                     'TrackTitle' : track['TrackTitle'] }
-                                     
-                newValueDict = { 'Location' : song['Location'],
-                                 'BitRate'  : song['BitRate'],
-                                 'Format'   : song['Format'] }
+                track = select_from_tracks_or_all_tracks(myDB,
+                    'SELECT TrackID, ReleaseID, AlbumID',
+                    'WHERE ReleaseID=? AND TrackTitle=?',
+                    [song['ReleaseID'], song['TrackTitle']])
 
-                myDB.upsert("alltracks", newValueDict, controlValueDict)
-                myDB.upsert("tracks", newValueDict, controlValueDict)
+                if track:
+                    # There can also only be one match for this query as well (although it might be on both the tracks and alltracks table)
+                    # So use both TrackID & ReleaseID as the control values
+                    controlValueDict = { 'TrackID'   : track['TrackID'],
+                                         'ReleaseID' : track['ReleaseID'] }
 
-                continue
-        
-        # Use the "CleanName" (ArtistName + AlbumTitle + TrackTitle stripped of punctuation, capitalization, etc)
-        # This is more reliable than the former but requires some string manipulation so we'll do it only
-        # if we can't find a match with the original data
-        if song['ArtistName'] and song['AlbumTitle'] and song['TrackTitle']:
-            
-            CleanName = helpers.cleanName(song['ArtistName'] +' '+ song['AlbumTitle'] +' '+song['TrackTitle'])
-            
-            track = myDB.action('SELECT CleanName from alltracks WHERE CleanName LIKE ?', [CleanName]).fetchone()
-            
-            if not track:
-                track = myDB.action('SELECT CleanName from tracks WHERE CleanName LIKE ?', [CleanName]).fetchone()
-    
-            if track:
-                controlValueDict = { 'CleanName' : track['CleanName'] }
-                                     
-                newValueDict = { 'Location' : song['Location'],
-                                 'BitRate'  : song['BitRate'],
-                                 'Format'   : song['Format'] }
+                    hybridControlValueDict = { 'TrackID'   : track['TrackID'],
+                                               'ReleaseID' : track['AlbumID'] }
 
-                myDB.upsert("alltracks", newValueDict, controlValueDict)
-                myDB.upsert("tracks", newValueDict, controlValueDict)
+                    # Update both tables here as well
+                    myDB.upsert("alltracks", newSongDict, controlValueDict)
+                    myDB.upsert("tracks", newSongDict, controlValueDict)
 
-                continue     
-        
-        # Match on TrackID alone if we can't find it using any of the above methods. This method is reliable
-        # but spans multiple releases - but that's why we're putting at the beginning as a last resort. If a track
-        # with more specific information exists in the library, it'll overwrite these values
-        if song['TrackID']:
-    
-            track = myDB.action('SELECT TrackID from alltracks WHERE TrackID=?', [song['TrackID']]).fetchone()
-            
-            if not track:
-                track = myDB.action('SELECT TrackID from tracks WHERE TrackID=?', [song['TrackID']]).fetchone()
-    
-            if track:
-                controlValueDict = { 'TrackID' : track['TrackID'] }
-                                     
-                newValueDict = { 'Location' : song['Location'],
-                                 'BitRate'  : song['BitRate'],
-                                 'Format'   : song['Format'] }
+                    myDB.upsert("alltracks", newSongDict, hybridControlValueDict)
+                    myDB.upsert("tracks", newSongDict, hybridControlValueDict)
 
-                myDB.upsert("alltracks", newValueDict, controlValueDict)
-                myDB.upsert("tracks", newValueDict, controlValueDict)
+                    # Done
+                    continue
 
-                continue          
+            # Next most specific will be the opposite: a TrackID and an AlbumTitle
+            # TrackIDs span multiple releases so if something is on an official album
+            # and a compilation, for example, this will match it to the right one
+            # However - there may be multiple matches here
+            if song['TrackID'] and song['AlbumTitle']:
+
+                # Even though there might be multiple matches, we just need to grab one to confirm a match
+                track = select_from_tracks_or_all_tracks(myDB,
+                    'SELECT TrackID, AlbumTitle',
+                    'WHERE TrackID=? AND AlbumTitle LIKE ?',
+                    [song['TrackID'], song['AlbumTitle']])
+
+                if track:
+                    # Don't need the hybridControlValueDict here since ReleaseID is not unique
+                    controlValueDict = { 'TrackID'   : track['TrackID'],
+                                         'AlbumTitle' : track['AlbumTitle'] }
+
+                    myDB.upsert("alltracks", newSongDict, controlValueDict)
+                    myDB.upsert("tracks", newSongDict, controlValueDict)
+
+                    continue
+
+            # Next most specific is the ArtistName + AlbumTitle + TrackTitle combo (but probably
+            # even more unreliable than the previous queries, and might span multiple releases)
+            if song['ArtistName'] and song['AlbumTitle'] and song['TrackTitle']:
+
+                track = select_from_tracks_or_all_tracks(myDB,
+                    'SELECT ArtistName, AlbumTitle, TrackTitle',
+                    'WHERE ArtistName LIKE ? AND AlbumTitle LIKE ? AND TrackTitle LIKE ?',
+                    [song['ArtistName'], song['AlbumTitle'], song['TrackTitle']])
+
+                if track:
+                    controlValueDict = { 'ArtistName' : track['ArtistName'],
+                                         'AlbumTitle' : track['AlbumTitle'],
+                                         'TrackTitle' : track['TrackTitle'] }
+
+                    myDB.upsert("alltracks", newSongDict, controlValueDict)
+                    myDB.upsert("tracks", newSongDict, controlValueDict)
+
+                    continue
+
+            # Use the "CleanName" (ArtistName + AlbumTitle + TrackTitle stripped of punctuation, capitalization, etc)
+            # This is more reliable than the former but requires some string manipulation so we'll do it only
+            # if we can't find a match with the original data
+            if song['ArtistName'] and song['AlbumTitle'] and song['TrackTitle']:
+
+                track = select_from_tracks_or_all_tracks(myDB,
+                    'SELECT CleanName',
+                    'WHERE CleanName LIKE ?',
+                    [cleanName])
+
+
+                if track:
+                    controlValueDict = { 'CleanName' : track['CleanName'] }
+
+                    myDB.upsert("alltracks", newSongDict, controlValueDict)
+                    myDB.upsert("tracks", newSongDict, controlValueDict)
+
+                    continue
+
+            # Match on TrackID alone if we can't find it using any of the above methods. This method is reliable
+            # but spans multiple releases - but that's why we're putting at the beginning as a last resort. If a track
+            # with more specific information exists in the library, it'll overwrite these values
+            if song['TrackID']:
+
+                track = select_from_tracks_or_all_tracks(myDB,
+                    'SELECT TrackID',
+                    'WHERE TrackID=?',
+                    [song['TrackID']])
+
+                if track:
+                    controlValueDict = { 'TrackID' : track['TrackID'] }
+
+                    myDB.upsert("alltracks", newSongDict, controlValueDict)
+                    myDB.upsert("tracks", newSongDict, controlValueDict)
+
+                    continue
+
+        #end "extra checks"
         
         # if we can't find a match in the database on a track level, it might be a new artist or it might be on a non-mb release
         if song['ArtistName']:
             new_artists.append(song['ArtistName'])
-        else:
+        
+        have_important_data = song['ArtistName'] and song['AlbumTitle'] and song['TrackTitle']
+        if not have_important_data:
             continue
         
-        # The have table will become the new database for unmatched tracks (i.e. tracks with no associated links in the database                
-        if song['ArtistName'] and song['AlbumTitle'] and song['TrackTitle']:
-            CleanName = helpers.cleanName(song['ArtistName'] +' '+ song['AlbumTitle'] +' '+song['TrackTitle'])
-        else:
-            continue
-        
-        myDB.action('INSERT INTO have (ArtistName, AlbumTitle, TrackNumber, TrackTitle, TrackLength, BitRate, Genre, Date, TrackID, Location, CleanName, Format) VALUES( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [song['ArtistName'], song['AlbumTitle'], song['TrackNumber'], song['TrackTitle'], song['TrackLength'], song['BitRate'], song['Genre'], song['Date'], song['TrackID'], song['Location'], CleanName, song['Format']])
+        # The have table will become the new database for unmatched tracks (i.e. tracks with no associated links in the database)
+        myDB.insert('have', {
+            'ArtistName':   song['ArtistName'],
+            'AlbumTitle':   song['AlbumTitle'],
+            'TrackNumber':  song['TrackNumber'],
+            'TrackTitle':   song['TrackTitle'],
+            'TrackLength':  song['TrackLength'],
+            'BitRate':      song['BitRate'],
+            'Genre':        song['Genre'],
+            'Date':         song['Date'],
+            'TrackID':      song['TrackID'],
+            'Location':     song['Location'],
+            'CleanName':    cleanName,
+            'Format':       song['Format']
+        })
 
-    logger.info('Completed matching tracks from directory: %s' % dir.decode(headphones.SYS_ENCODING, 'replace'))
+    logger.info('Completed matching tracks from directory: %s' % unicode_dir)
     
     
     if not append:
@@ -324,9 +291,7 @@ def libraryScan(dir=None, append=False, ArtistID=None, ArtistName=None, cron=Fal
         logger.info('Updating current artist track counts')
     
         for artist in current_artists:
-            # Have tracks are selected from tracks table and not all tracks because of duplicates
-            # We update the track count upon an album switch to compliment this
-            havetracks = len(myDB.select('SELECT TrackTitle from tracks WHERE ArtistID=? AND Location IS NOT NULL', [artist['ArtistID']])) + len(myDB.select('SELECT TrackTitle from have WHERE ArtistName like ?', [artist['ArtistName']]))
+            havetracks = count_have_tracks(myDB, artist['ArtistID'], artist['ArtistName'])
             myDB.action('UPDATE artists SET HaveTracks=? WHERE ArtistID=?', [havetracks, artist['ArtistID']])
             
         logger.info('Found %i new artists' % len(artist_list))
@@ -348,6 +313,124 @@ def libraryScan(dir=None, append=False, ArtistID=None, ArtistName=None, cron=Fal
         # If we're appending a new album to the database, update the artists total track counts
         logger.info('Updating artist track counts')
         
-        havetracks = len(myDB.select('SELECT TrackTitle from tracks WHERE ArtistID=? AND Location IS NOT NULL', [ArtistID])) + len(myDB.select('SELECT TrackTitle from have WHERE ArtistName like ?', [ArtistName]))
+        havetracks = count_have_tracks(myDB, ArtistID, ArtistName)
         myDB.action('UPDATE artists SET HaveTracks=? WHERE ArtistID=?', [havetracks, ArtistID])
-    
+
+def count_have_tracks(myDB, artistId, artistName):
+    # Have tracks are selected from tracks table and not from alltracks because of duplicates
+    # We update the track count upon an album switch to compliment this
+    return myDB.select('SELECT count(1) from tracks WHERE ArtistID=? AND Location IS NOT NULL', [artistID]).fetchone()[0] + \
+           myDB.select('SELECT count(1) from have WHERE ArtistName like ?', [artistName]).fetchone()[0]
+
+#idiomatization for a bunch of queries that happened a lot of times
+def select_from_tracks_or_all_tracks(myDB, select, where, args):
+    return myDB.action(select+' from alltracks '+where, args).fetchone() or \
+           myDB.action(select+' from tracks    '+where, args).fetchone()
+
+def scanDirectory(dir):
+    logger.info('Scanning music directory: %s' % dir)
+
+    bitrates = []
+    song_list = []
+
+    for r,d,f in os.walk(dir):
+        #need to abuse slicing to get a copy of the list, doing it directly will skip the element after a deleted one
+        #using a list comprehension will not work correctly for nested subdirectories (os.walk keeps its original list)
+        for directory in d[:]:
+            if directory.startswith("."):
+                d.remove(directory)
+        for file_path in f:
+            #skip files with formats we don't care about
+            if not any(file_path.endswith('.' + x.lower()) for x in headphones.MEDIA_FORMATS):
+                continue
+
+            # We need the unicode path to use for logging, inserting into database
+            abs_path = os.path.join(r, file_path)
+            unicode_path = abs_path.decode(headphones.SYS_ENCODING, 'replace')
+
+            # Try to read the metadata
+            try:
+                f = MediaFile(unicode_path)
+            except:
+                logger.error('Cannot read file: ' + unicode_path)
+                continue
+
+            # Grab the bitrates for the auto detect bit rate option
+            if headphones.DETECT_BITRATE and f.bitrate:
+                bitrates.append(f.bitrate)
+
+            # Add the song to our song list -
+            # TODO: skip adding songs without the minimum requisite information (just a matter of putting together the right if statements)
+
+            song_dict = { 'TrackID'   :  f.mb_trackid,
+                          'ReleaseID' :  f.mb_albumid,
+                          # Use the album artist over the artist if available
+                          'ArtistName' : f.albumartist or f.artist,
+                          'AlbumTitle' : f.album,
+                          'TrackNumber': f.track,
+                          'TrackLength': f.length,
+                          'Genre'      : f.genre,
+                          'Date'       : f.date,
+                          'TrackTitle' : f.title,
+                          'BitRate'    : f.bitrate,
+                          'Format'     : f.format,
+                          'Location'   : unicode_path }
+
+            song_list.append(song_dict)
+
+    return song_list, bitrates
+
+def scanBeetsDB(dir):
+    bitrates = []
+    song_list = []
+
+    db_path = headphones.BEETS_DB_PATH
+    if not os.path.isfile(db_path):
+        logger.error("could not find beets library in %s; aborting" % db_path)
+        return song_list, bitrates
+
+    logger.info('Reading beets database %s to get music from %s' % (db_path, dir))
+    beets_db = beets.Library(path=db_path)
+
+    for f in beets_db.items(beets.PathQuery(dir)):
+        #skip files with formats we don't care about
+        if not any(f.path.lower().endswith('.' + x.lower()) for x in headphones.MEDIA_FORMATS):
+            continue
+
+        # We need the unicode path to use for logging, inserting into database
+        unicode_path = f.path.decode(headphones.SYS_ENCODING, 'replace')
+
+        # Grab the bitrates for the auto detect bit rate option
+        if headphones.DETECT_BITRATE and f.bitrate:
+            bitrates.append(f.bitrate)
+
+        try:
+            f_date = datetime.date(
+                max(f.year,  datetime.MINYEAR),
+                max(f.month, 1),
+                max(f.day, 1)
+            )
+        except ValueError:  # Out of range values.
+            f_date = datetime.date.min
+
+        # Add the song to our song list -
+        # TODO: skip adding songs without the minimum requisite information (just a matter of putting together the right if statements)
+
+        song_dict = { 'TrackID'    : f.mb_trackid,
+                      'ReleaseID'  : f.mb_albumid,
+                      # Use the album artist over the artist if available
+                      'ArtistName' : f.albumartist or f.artist,
+                      'AlbumTitle' : f.album,
+                      'TrackNumber': f.track,
+                      'TrackLength': f.length,
+                      'Genre'      : f.genre,
+                      'Date'       : f_date,
+                      'TrackTitle' : f.title,
+                      'BitRate'    : f.bitrate,
+                      'Format'     : f.format,
+                      'Location'   : unicode_path }
+
+        song_list.append(song_dict)
+
+    return song_list, bitrates
+

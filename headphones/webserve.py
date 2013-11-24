@@ -379,10 +379,12 @@ class WebInterface(object):
         raise cherrypy.HTTPRedirect("home")
     importItunes.exposed = True
 
-    def musicScan(self, path, scan=0, redirect=None, autoadd=0, libraryscan=0):
+    def musicScan(self, path, scan=0, redirect=None, autoadd=0, libraryscan=0, use_beets_db=0, beets_db_path=None):
         headphones.LIBRARYSCAN = libraryscan
         headphones.ADD_ARTISTS = autoadd
         headphones.MUSIC_DIR = path
+        headphones.USE_BEETS_DB = use_beets_db
+        headphones.BEETS_DB_PATH = beets_db_path
         headphones.config_write()
         if scan:
             try:

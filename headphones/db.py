@@ -90,14 +90,18 @@ class DBConnection:
             return sqlResult
     
     def select(self, query, args=None):
-    
-        sqlResults = self.action(query, args).fetchall()
-        
-        if sqlResults == None:
-            return []
-            
-        return sqlResults
-                    
+        return self.action(query, args).fetchall() or []
+
+    def insert(self, tableName, valuesDict):
+        self.action(
+            'INSERT INTO %s (%s) VALUES (%s)' % (
+                tableName,
+                ', '.join(valuesDict.keys()),
+                ', '.join(['?'] * len(valuesDict.keys()))
+            ),
+            valuesDict.values()
+        )
+
     def upsert(self, tableName, valueDict, keyDict):
     
         changesBefore = self.connection.total_changes
